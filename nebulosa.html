@@ -1,0 +1,351 @@
+<title>Nebulosa de Bolsillo</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@300;600&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+  /* Layout: una sola pantalla de cielo profundo; controles flotando abajo, título arriba a la izquierda */
+  :root {
+    --void: #04030a;
+    --ink: #e9e4ff;
+    --dim: #8c84b8;
+    --glass: rgba(20, 16, 40, 0.55);
+    --line: rgba(190, 170, 255, 0.18);
+    --hot: #ffb36b;
+    --display: "Unbounded", "Avenir Next", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--void);
+    color: var(--ink);
+    overflow: hidden;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .top {
+    position: fixed; top: 0; left: 0; right: 0;
+    padding-top: calc(env(safe-area-inset-top, 0px) + 18px);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    pointer-events: none;
+    display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+  }
+  h1 {
+    margin: 0; font-family: var(--display); font-weight: 300;
+    font-size: clamp(18px, 5vw, 26px); letter-spacing: 0.02em; text-wrap: balance;
+  }
+  h1 b { font-weight: 600; color: var(--hot); }
+  .readout {
+    font-family: var(--mono); font-size: 11px; color: var(--dim);
+    font-variant-numeric: tabular-nums; text-align: right; line-height: 1.5;
+  }
+  .hint {
+    position: fixed; left: 0; right: 0; top: 50%; transform: translateY(150px);
+    text-align: center; font-family: var(--mono); font-size: 12px; color: var(--dim);
+    letter-spacing: 0.08em; text-transform: uppercase; pointer-events: none;
+    transition: opacity .8s ease; padding-inline: 16px;
+  }
+  .hint.gone { opacity: 0; }
+  .dock {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 18px);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    display: flex; justify-content: center; pointer-events: none;
+  }
+  .modes {
+    pointer-events: auto;
+    display: flex; gap: 4px; padding: 5px; border-radius: 999px;
+    background: var(--glass); border: 1px solid var(--line);
+    -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    max-width: 100%; overflow-x: auto;
+  }
+  .modes button {
+    font: 600 12px/1 var(--display); letter-spacing: 0.04em;
+    color: var(--dim); background: transparent; border: 0;
+    padding: 11px 14px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+    transition: color .25s, background .25s;
+  }
+  .modes button[aria-pressed="true"] { color: var(--void); background: var(--ink); }
+  .modes button:focus-visible { outline: 2px solid var(--hot); outline-offset: 2px; }
+</style>
+
+<canvas id="sky"></canvas>
+
+<div class="top">
+  <h1>Nebulosa <b>de bolsillo</b></h1>
+  <div class="readout" id="readout">— estrellas<br>— fps</div>
+</div>
+
+<div class="hint" id="hint">Mantén el dedo: agujero negro · Suéltalo: supernova</div>
+
+<nav class="dock">
+  <div class="modes" id="modes">
+    <button id="m-galaxy" data-mode="galaxy" aria-pressed="true">Galaxia</button>
+    <button id="m-sphere" data-mode="sphere" aria-pressed="false">Planeta</button>
+    <button id="m-heart" data-mode="heart" aria-pressed="false">Corazón</button>
+    <button id="m-word" data-mode="word" aria-pressed="false">WOW</button>
+  </div>
+</nav>
+
+<script>
+(() => {
+  const cv = document.getElementById('sky');
+  const ctx = cv.getContext('2d');
+  const readout = document.getElementById('readout');
+  const hint = document.getElementById('hint');
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let W = 0, H = 0, DPR = 1, S = 1;
+  const N = Math.min(3200, Math.round((innerWidth * innerHeight) / 140) + 1200);
+  const px = new Float32Array(N), py = new Float32Array(N);
+  const vx = new Float32Array(N), vy = new Float32Array(N);
+  const tx = new Float32Array(N), ty = new Float32Array(N);
+  const seed = new Float32Array(N), depth = new Float32Array(N);
+  // per-mode base data
+  const gR = new Float32Array(N), gA = new Float32Array(N);
+  const sX = new Float32Array(N), sY = new Float32Array(N), sZ = new Float32Array(N);
+  const fX = new Float32Array(N), fY = new Float32Array(N);
+
+  let mode = 'galaxy';
+  let hueBase = 265;
+  const HUES = { galaxy: 265, sphere: 195, heart: 340, word: 30 };
+
+  function resize() {
+    DPR = Math.min(2, devicePixelRatio || 1);
+    W = innerWidth; H = innerHeight;
+    cv.width = W * DPR; cv.height = H * DPR;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    S = Math.min(W, H);
+    ctx.fillStyle = '#04030a'; ctx.fillRect(0, 0, W, H);
+    if (mode === 'word' || mode === 'heart') buildStatic(mode);
+  }
+
+  function init() {
+    const golden = Math.PI * (3 - Math.sqrt(5));
+    for (let i = 0; i < N; i++) {
+      seed[i] = Math.random();
+      // galaxy: 3 logarithmic arms + dense core
+      const arm = i % 3;
+      const r = Math.pow(Math.random(), 1.6);
+      gR[i] = r;
+      gA[i] = arm * (Math.PI * 2 / 3) + r * 5.2 + (Math.random() - 0.5) * (0.9 - r * 0.5);
+      // sphere: fibonacci lattice
+      const y = 1 - (i / (N - 1)) * 2, rad = Math.sqrt(1 - y * y), th = golden * i;
+      sX[i] = Math.cos(th) * rad; sY[i] = y; sZ[i] = Math.sin(th) * rad;
+      px[i] = Math.random() * innerWidth; py[i] = Math.random() * innerHeight;
+    }
+  }
+
+  function buildStatic(m) {
+    if (m === 'heart') {
+      for (let i = 0; i < N; i++) {
+        const t = seed[i] * Math.PI * 2;
+        const fill = Math.sqrt((i * 0.618) % 1) ; // fill the interior, denser at the rim
+        const k = i % 4 === 0 ? 1 : 0.35 + fill * 0.65;
+        const hx = 16 * Math.pow(Math.sin(t), 3);
+        const hy = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
+        fX[i] = hx * k / 17; fY[i] = hy * k / 17 - 0.05;
+      }
+      return;
+    }
+    // word: sample pixels from offscreen text
+    const oc = document.createElement('canvas');
+    const ow = 600, oh = 260; oc.width = ow; oc.height = oh;
+    const o = oc.getContext('2d');
+    o.fillStyle = '#fff'; o.textAlign = 'center'; o.textBaseline = 'middle';
+    o.font = '600 190px Unbounded, system-ui, sans-serif';
+    o.fillText('WOW', ow / 2, oh / 2 + 8);
+    const data = o.getImageData(0, 0, ow, oh).data;
+    const pts = [];
+    for (let y = 0; y < oh; y += 3) for (let x = 0; x < ow; x += 3)
+      if (data[(y * ow + x) * 4 + 3] > 128) pts.push(x, y);
+    const count = pts.length / 2;
+    const scale = Math.min(W * 0.9 / ow, H * 0.5 / oh) / (S * 0.5);
+    for (let i = 0; i < N; i++) {
+      const j = Math.floor(seed[i] * count) * 2;
+      fX[i] = (pts[j] - ow / 2 + (Math.random() - 0.5) * 2.5) * scale;
+      fY[i] = (pts[j + 1] - oh / 2 + (Math.random() - 0.5) * 2.5) * scale;
+    }
+  }
+
+  function setMode(m) {
+    mode = m;
+    hueBase = HUES[m];
+    if (m === 'heart' || m === 'word') buildStatic(m);
+    document.querySelectorAll('#modes button').forEach(b =>
+      b.setAttribute('aria-pressed', String(b.dataset.mode === m)));
+    // scatter kick so the transition reads as a burst
+    for (let i = 0; i < N; i++) {
+      const a = seed[i] * 6.283;
+      vx[i] += Math.cos(a) * 6 * seed[i]; vy[i] += Math.sin(a) * 6 * seed[i];
+    }
+  }
+
+  document.getElementById('modes').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (b) setMode(b.dataset.mode);
+  });
+  document.getElementById('modes').addEventListener('pointerdown', e => e.stopPropagation());
+
+  // touch: black hole while held, supernova on release
+  const well = { on: false, x: 0, y: 0, held: 0 };
+  cv.addEventListener('pointerdown', e => {
+    well.on = true; well.x = e.clientX; well.y = e.clientY; well.held = 0;
+    hint.classList.add('gone');
+    cv.setPointerCapture?.(e.pointerId);
+  });
+  cv.addEventListener('pointermove', e => { if (well.on) { well.x = e.clientX; well.y = e.clientY; } });
+  const release = () => {
+    if (!well.on) return;
+    well.on = false;
+    const power = Math.min(1, well.held / 90) * 38 + 8;
+    for (let i = 0; i < N; i++) {
+      const dx = px[i] - well.x, dy = py[i] - well.y;
+      const d = Math.hypot(dx, dy) + 1;
+      const f = power * Math.exp(-d / (S * 0.35)) * (0.6 + seed[i] * 0.8);
+      vx[i] += dx / d * f; vy[i] += dy / d * f;
+    }
+    flash = Math.min(1, well.held / 90);
+    try { navigator.vibrate?.(Math.round(20 + flash * 60)); } catch (_) {}
+  };
+  cv.addEventListener('pointerup', release);
+  cv.addEventListener('pointercancel', release);
+
+  let flash = 0, t = 0, last = performance.now(), fpsAcc = 0, fpsN = 0, fps = 60;
+  const BUCKETS = 14;
+  const paths = Array.from({ length: BUCKETS }, () => []);
+
+  function targets(time) {
+    const cx = W / 2, cy = H / 2 - H * 0.02, R = S * 0.42;
+    if (mode === 'galaxy') {
+      const tilt = 0.62;
+      for (let i = 0; i < N; i++) {
+        const r = gR[i];
+        const a = gA[i] + time * (0.35 / (0.25 + r)); // differential rotation
+        const rr = r * R * 1.15;
+        tx[i] = cx + Math.cos(a) * rr;
+        ty[i] = cy + Math.sin(a) * rr * tilt;
+        depth[i] = 1 - r * 0.5;
+      }
+    } else if (mode === 'sphere') {
+      const ry = time * 0.5, rx = 0.4 + Math.sin(time * 0.3) * 0.25;
+      const cyr = Math.cos(ry), syr = Math.sin(ry), cxr = Math.cos(rx), sxr = Math.sin(rx);
+      for (let i = 0; i < N; i++) {
+        // ring particles for a planet look
+        let x, y, z;
+        if (i % 5 === 0) {
+          const a = seed[i] * 6.283 + time * 0.2, rr = 1.45 + (i % 7) * 0.05;
+          x = Math.cos(a) * rr; y = 0; z = Math.sin(a) * rr;
+        } else { x = sX[i]; y = sY[i]; z = sZ[i]; }
+        const x1 = x * cyr + z * syr, z1 = -x * syr + z * cyr;
+        const y2 = y * cxr - z1 * sxr, z2 = y * sxr + z1 * cxr;
+        const p = 2.6 / (2.6 + z2);
+        tx[i] = cx + x1 * R * 0.62 * p;
+        ty[i] = cy + y2 * R * 0.62 * p;
+        depth[i] = 0.35 + (1 - (z2 + 1.5) / 3) * 0.9;
+      }
+    } else {
+      const beat = mode === 'heart'
+        ? 1 + Math.pow(Math.max(0, Math.sin(time * 3.2)), 12) * 0.08
+        : 1;
+      for (let i = 0; i < N; i++) {
+        const w = Math.sin(time * 1.7 + seed[i] * 40) * 0.006;
+        tx[i] = cx + (fX[i] * beat + w) * S * 0.5;
+        ty[i] = cy + (fY[i] * beat + w) * S * 0.5;
+        depth[i] = 0.7 + seed[i] * 0.4;
+      }
+    }
+  }
+
+  function frame(now) {
+    const dt = Math.min(50, now - last); last = now;
+    fpsAcc += dt; fpsN++;
+    if (fpsAcc > 500) { fps = Math.round(1000 * fpsN / fpsAcc); fpsAcc = 0; fpsN = 0;
+      readout.innerHTML = N.toLocaleString('es') + ' estrellas<br>' + fps + ' fps'; }
+    t += (reduce ? 0.3 : 1) * dt / 1000;
+    if (well.on) well.held++;
+
+    targets(t);
+
+    // trails
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = well.on ? 'rgba(4,3,10,0.32)' : 'rgba(4,3,10,0.22)';
+    ctx.fillRect(0, 0, W, H);
+
+    const spring = well.on ? 0.0025 : 0.012;
+    const damp = 0.9;
+    const G = S * 9;
+    for (let b = 0; b < BUCKETS; b++) paths[b].length = 0;
+
+    for (let i = 0; i < N; i++) {
+      let ax = (tx[i] - px[i]) * spring, ay = (ty[i] - py[i]) * spring;
+      if (well.on) {
+        const dx = well.x - px[i], dy = well.y - py[i];
+        const d2 = dx * dx + dy * dy + 900;
+        const d = Math.sqrt(d2);
+        const f = Math.min(2.2, G / d2) * (1 + Math.min(1, well.held / 120));
+        ax += dx / d * f - dy / d * f * 0.9; // pull + swirl
+        ay += dy / d * f + dx / d * f * 0.9;
+      }
+      vx[i] = (vx[i] + ax) * damp; vy[i] = (vy[i] + ay) * damp;
+      px[i] += vx[i]; py[i] += vy[i];
+      const sp = Math.min(1, Math.hypot(vx[i], vy[i]) / 14);
+      const b = Math.min(BUCKETS - 1, (sp * (BUCKETS - 1)) | 0);
+      paths[b].push(i);
+    }
+
+    ctx.globalCompositeOperation = 'lighter';
+    for (let b = 0; b < BUCKETS; b++) {
+      const list = paths[b]; if (!list.length) continue;
+      const k = b / (BUCKETS - 1);
+      // slow particles keep the mode hue; fast ones heat toward amber-white
+      const hue = hueBase + (35 - hueBase + (hueBase > 180 ? 360 : 0)) * k * 0.9;
+      ctx.fillStyle = `hsla(${hue % 360}, ${85 - k * 30}%, ${55 + k * 30}%, ${0.55 + k * 0.4})`;
+      ctx.beginPath();
+      for (let n = 0; n < list.length; n++) {
+        const i = list[n];
+        const s = (0.7 + depth[i] * 1.1 + k * 1.2);
+        ctx.rect(px[i] - s / 2, py[i] - s / 2, s, s);
+      }
+      ctx.fill();
+    }
+
+    // core glow / event horizon
+    if (well.on) {
+      const r = 26 + Math.min(1, well.held / 120) * 30;
+      const g = ctx.createRadialGradient(well.x, well.y, 0, well.x, well.y, r * 3);
+      g.addColorStop(0, 'rgba(0,0,0,0)');
+      g.addColorStop(0.3, `hsla(${hueBase},90%,60%,0.25)`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(well.x, well.y, r * 3, 0, 6.283); ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(well.x, well.y, r * 0.45, 0, 6.283); ctx.fill();
+    } else if (mode === 'galaxy') {
+      const g = ctx.createRadialGradient(W / 2, H * 0.48, 0, W / 2, H * 0.48, S * 0.12);
+      g.addColorStop(0, 'rgba(255,220,190,0.10)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    }
+
+    if (flash > 0.02) {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = `rgba(255,190,120,${flash * 0.35})`;
+      ctx.fillRect(0, 0, W, H);
+      flash *= 0.86;
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  init();
+  resize();
+  addEventListener('resize', resize);
+  // rebuild the word once the display font has loaded
+  document.fonts?.ready.then(() => { if (mode === 'word') buildStatic('word'); });
+  navigator.wakeLock?.request('screen').catch(() => {});
+  requestAnimationFrame(frame);
+})();
+</script>
